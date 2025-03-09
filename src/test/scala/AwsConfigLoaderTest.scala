@@ -2,6 +2,10 @@ import com.typesafe.config.{Config, ConfigFactory}
 import org.mockito.MockitoSugar
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
+import software.amazon.awssdk.regions.Region
+import software.amazon.awssdk.services.ec2.Ec2Client
+import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient
+import software.amazon.awssdk.services.ssm.SsmClient
 
 /**
  * This test uses the escape pattern defined in TemplateParser
@@ -14,34 +18,38 @@ import org.scalatest.matchers.should.Matchers
  * the AWSUtilFunctions.lookup methods. (It is assumed that AWSUtilFunctions
  * is implemented so that its lookup functions can be re-assigned via var.)
  */
-class AwsConfigLoaderSpec extends AnyFlatSpec with Matchers with MockitoSugar {
+class AwsConfigLoaderTest extends AnyFlatSpec with Matchers with MockitoSugar {
 
-  // Back-up the original lookup functions.
-  // These functions are assumed defined as vars in AWSUtilFunctions.
-  // For example:
-  //   var getAWSSecret: (SecretsManagerClient, String) => String = { (client, secretName) => ... }
-  //   var getAWSParameter: (SsmClient, String) => String = { (client, parameterName) => ... }
-  private val originalGetAWSSecret = AWSUtil.getAWSSecret _
-  private val originalGetAWSParameter = AWSUtil.getAWSParameter _
-
-  override def withFixture(test: NoArgTest) = {
-    // Override AWS lookups with our fake implementations.
-    // This uses the same mocks already defined in AWSUtilTest.
-    AWSUtil.getAWSSecret = (_: Any, secretName: String) => secretName match {
-      case "MySecretId" => "FakeSecretValue"
-      case other        => s"UnknownSecret($other)"
-    }
-    AWSUtil.getAWSParameter = (_: Any, parameterName: String) => parameterName match {
-      case "MyParameterName" => "FakeParameterValue"
-      case other             => s"UnknownParameter($other)"
+  AWSUtil.awsLookup = new AwsLookup {
+    override def getAWSSecret(secretClient: SecretsManagerClient, secretName: String): String = {
+      secretName match {
+        case "MySecretId" => "FakeSecretValue"
+        case "MySecret" => "SecretValue123"
+        case "DatabasePassword" => "FakeDatabasePassword"
+        case other => s"UnknownSecret($other)"
+      }
     }
 
-    try {
-      super.withFixture(test)
-    } finally {
-      // Restore the original lookup implementations after each test.
-      AWSUtil.getAWSSecret = originalGetAWSSecret
-      AWSUtil.getAWSParameter = originalGetAWSParameter
+    override def getAWSParameter(ssmClient: SsmClient, parameterName: String): String = {
+      parameterName match {
+        case "MyParameterName" => "FakeParameterValue"
+        case "LogFilePath" => "/var/log/FakeLogs"
+        case "TestParameter" => "ParameterValue from SSM"
+        case other => s"UnknownParameter($other)"
+      }
+    }
+
+    override def getEC2MetadataTag(ec2Client: Ec2Client, tag: String): String = {
+      tag match {
+        case "Environment" => "dev"
+        case "Port" => "1234"
+        case "Name" => "hostname.domain.com"
+        case other => s"UnknownTag($other)"
+      }
+    }
+
+    override def getCurrentRegion(ec2Client: Ec2Client): String = {
+      Region.US_EAST_1.toString
     }
   }
 
@@ -50,6 +58,8 @@ class AwsConfigLoaderSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     val testConfigStr =
       """
         |my {
+        |  region = "${aws:region:fake}"
+        |
         |  secret {
         |    key = "${aws:secret:MySecretId}"
         |  }
@@ -75,5 +85,21 @@ class AwsConfigLoaderSpec extends AnyFlatSpec with Matchers with MockitoSugar {
 
     // Also verify that configuration entries without placeholders remain unchanged.
     loadedConfig.getString("my.staticValue") shouldEqual "FixedValue"
+    loadedConfig.getString("my.region") shouldEqual "us-east-1"
+  }
+
+  "AwsConfigLoader" should "Load and parse configs from application.conf" in {
+    val config: Config = AwsConfigLoader.load()
+
+    config.getString("my.secret.key") shouldEqual "FakeSecretValue"
+    config.getString("my.param.key") shouldEqual "FakeParameterValue"
+    config.getString("logging.file") shouldEqual "/var/log/FakeLogs"
+    config.getString("service.database.password") shouldEqual "FakeDatabasePassword"
+
+    config.getString("app.host") shouldEqual "hostname.domain.com"
+    config.getString("app.port") shouldEqual "1234"
+
+    config.getString("my.region") shouldEqual "us-east-1"
+    config.getString("my.environment") shouldEqual "dev"
   }
 }
