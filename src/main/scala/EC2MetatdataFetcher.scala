@@ -1,0 +1,3 @@
+object EC2MetatdataFetcher {
+
+}
